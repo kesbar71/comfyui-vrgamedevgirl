@@ -39,6 +39,7 @@ from .VRGDG_FaceFix import register_face_fix_routes
 from .VRGDG_GemmaPromptSanitizer import extract_prompt_text_from_gemma_output
 from .VRGDG_StoryboardBuilderNodes import _STORYBOARD_T2I_GEMMA_INSTRUCTIONS
 from .VRGDG_MiniMaxH3PromptInstructions import (
+    MINIMAX_H3_IMAGE_REFERENCE_TO_VIDEO_INSTRUCTIONS,
     MINIMAX_H3_IMAGE_TO_VIDEO_INSTRUCTIONS,
     MINIMAX_H3_REFERENCE_TO_VIDEO_INSTRUCTIONS,
     MINIMAX_H3_TEXT_TO_VIDEO_INSTRUCTIONS,
@@ -1062,6 +1063,7 @@ _BUILDER_INSTRUCTION_DEFAULTS = {
     "i2v": _I2V_INSTRUCTIONS,
     "krea2_t2i": _STANDARD_IMAGE_T2I_INSTRUCTIONS,
     "minimax_h3_image_to_video": MINIMAX_H3_IMAGE_TO_VIDEO_INSTRUCTIONS,
+    "minimax_h3_image_reference_to_video": MINIMAX_H3_IMAGE_REFERENCE_TO_VIDEO_INSTRUCTIONS,
     "minimax_h3_reference_to_video": MINIMAX_H3_REFERENCE_TO_VIDEO_INSTRUCTIONS,
     "minimax_h3_text_to_video": MINIMAX_H3_TEXT_TO_VIDEO_INSTRUCTIONS,
     "minimax_h3_video_to_video": MINIMAX_H3_VIDEO_TO_VIDEO_INSTRUCTIONS,
@@ -1084,6 +1086,7 @@ _BUILDER_INSTRUCTION_LABELS = {
     "i2v": "Image to Video",
     "krea2_t2i": "Krea 2 Text to Image",
     "minimax_h3_image_to_video": "MiniMax H3 Image to Video",
+    "minimax_h3_image_reference_to_video": "MiniMax H3 Image + Reference to Video",
     "minimax_h3_reference_to_video": "MiniMax H3 Reference to Video",
     "minimax_h3_text_to_video": "MiniMax H3 Text to Video",
     "minimax_h3_video_to_video": "MiniMax H3 Video to Video",
@@ -2870,13 +2873,13 @@ def _save_editable_text_file(payload):
     return {"path": file_path}
 
 
-def _segments_to_srt(segments):
+def _segments_to_srt(segments, text_field="label"):
     lines = []
     ordered = sorted(segments, key=lambda item: float(item.get("start", 0) or 0))
     for index, segment in enumerate(ordered, start=1):
         start = float(segment.get("start", 0) or 0)
         end = max(start + 0.1, float(segment.get("end", start + 4) or start + 4))
-        text = str(segment.get("label") or segment.get("t2i_prompt") or f"Scene {index}").strip()
+        text = str(segment.get(text_field) or segment.get("label") or segment.get("t2i_prompt") or f"Scene {index}").strip()
         lines.extend([str(index), f"{_format_srt_time(start)} --> {_format_srt_time(end)}", text, ""])
     return "\n".join(lines).strip() + "\n"
 
@@ -10090,7 +10093,8 @@ def _prepare_scene_audio_mix(payload):
 
     srt_path = _srt_path(project_folder)
     with open(srt_path, "w", encoding="utf-8") as handle:
-        handle.write(_segments_to_srt(segments))
+        text_field = "lyric_text" if str(payload.get("srt_text_field", "") or "").strip() == "lyric_text" else "label"
+        handle.write(_segments_to_srt(segments, text_field=text_field))
 
     shutil.rmtree(parts_folder, ignore_errors=True)
     audio_info = _read_audio_peaks(mix_path, 1600)
