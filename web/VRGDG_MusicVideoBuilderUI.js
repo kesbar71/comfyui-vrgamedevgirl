@@ -227,6 +227,7 @@ const DEFAULT_MINIMAX_H3_SETTINGS = {
   video_mode: "text_to_video",
   audio_mode: "input_audio",
   continuity_mode: "off",
+  latent_context_frames: 22,
   diffusion_model_name: "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
   clip_name: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
   video_vae_name: "minimax_h3_video_vae_fp16.safetensors",
@@ -265,6 +266,9 @@ const DEFAULT_MINIMAX_H3_SETTINGS = {
   two_pass_latent_upscale_scale: 2,
   two_pass_latent_upscaler_name: "minimax_h3_latent_upscaler_3d_bf16.safetensors",
   two_pass_use_te_speed: true,
+  two_pass_use_feedforward: false,
+  two_pass_use_block_sparse_attention: false,
+  two_pass_use_fast_vae_decode: false,
   two_pass_te_speed_processing_control: 0.07,
   two_pass_te_speed_start_percent: 0.1,
   two_pass_te_speed_end_percent: 0.9,
@@ -308,23 +312,23 @@ const DEFAULT_MINIMAX_H3_SETTINGS = {
   three_pass_pass3_scheduler: "beta",
   three_pass_pass3_seed: 69,
   three_pass_pass3_te_speed: false,
-  advanced_two_pass_vram_preset: "12gb",
-  advanced_two_pass_defaults_version: 2,
+  advanced_two_pass_vram_preset: "custom",
+  advanced_two_pass_defaults_version: 3,
   advanced_two_pass_tile_size_mode: "rows_cols",
   advanced_two_pass_tile_width: 512,
   advanced_two_pass_tile_height: 512,
   advanced_two_pass_grid_rows: 3,
   advanced_two_pass_grid_cols: 5,
-  advanced_two_pass_chunk_length: 85,
+  advanced_two_pass_chunk_length: 272,
   advanced_two_pass_temporal_overlap: 17,
   advanced_two_pass_anchor_strength: 0.999,
   advanced_two_pass_spatial_w_overlap: 128,
   advanced_two_pass_spatial_h_overlap: 128,
-  advanced_two_pass_fade_width: 64,
-  advanced_two_pass_fade_height: 64,
+  advanced_two_pass_fade_width: 160,
+  advanced_two_pass_fade_height: 128,
   advanced_two_pass_min_tile_size: 256,
-  advanced_two_pass_overlap_mode: "later",
-  advanced_two_pass_overlap_blend: "linear",
+  advanced_two_pass_overlap_mode: "earlier",
+  advanced_two_pass_overlap_blend: "smoothstep",
   advanced_two_pass_upscaler_device: "cuda",
   advanced_two_pass_upscaler_precision: "bf16",
   advanced_two_pass_pass1_megapixels: 0.4,
@@ -345,6 +349,8 @@ const DEFAULT_MINIMAX_H3_SETTINGS = {
 
 const MINIMAX_H3_CONTINUITY_OPTIONS = [
   { value: "off", label: "Off" },
+  { value: "latent_continuation", label: "Latent Continuation (native H3 temporal context)" },
+  { value: "latent_continuation_exact_frame", label: "Latent Continuation + Exact Last Frame (H3 temporal context + image)" },
   { value: "spatial_reference", label: "Previous final frame — spatial reference" },
   { value: "exact_start_frame", label: "Previous final frame — exact start frame" },
 ];
@@ -385,9 +391,15 @@ function normalizeMiniMaxH3AudioMode(value) {
 
 function normalizeMiniMaxH3ContinuityMode(value) {
   const clean = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["latent_exact", "latent_exact_frame", "latent_continuation_exact", "latent_continuation_exact_frame"].includes(clean)) return "latent_continuation_exact_frame";
+  if (["latent", "latent_continuation", "continuation"].includes(clean)) return "latent_continuation";
   if (["spatial", "spatial_reference", "continuity_reference"].includes(clean)) return "spatial_reference";
   if (["exact", "exact_start", "exact_start_frame", "continuous_start"].includes(clean)) return "exact_start_frame";
   return "off";
+}
+
+function isMiniMaxH3LatentContinuationMode(mode) {
+  return mode === "latent_continuation" || mode === "latent_continuation_exact_frame";
 }
 
 function normalizeMiniMaxH3StartFrameCharacterInfluence(value) {
@@ -464,7 +476,26 @@ function normalizeMiniMaxH3VideoPurpose(value) {
 function cloneMiniMaxH3Settings(value = {}) {
   const source = value && typeof value === "object" ? value : {};
   const hasCurrentTwoPassDefaults = Number(source.two_pass_defaults_version || 0) >= 1;
-  const hasCurrentAdvancedTwoPassDefaults = Number(source.advanced_two_pass_defaults_version || 0) >= 2;
+  const hasCurrentAdvancedTwoPassDefaults = Number(source.advanced_two_pass_defaults_version || 0) >= 3;
+  const legacyAdvancedDefaults = {
+    advanced_two_pass_vram_preset: "12gb",
+    advanced_two_pass_tile_size_mode: "rows_cols",
+    advanced_two_pass_chunk_length: 85,
+    advanced_two_pass_temporal_overlap: 17,
+    advanced_two_pass_anchor_strength: 0.999,
+    advanced_two_pass_spatial_w_overlap: 128,
+    advanced_two_pass_spatial_h_overlap: 128,
+    advanced_two_pass_fade_width: 64,
+    advanced_two_pass_fade_height: 64,
+    advanced_two_pass_min_tile_size: 256,
+    advanced_two_pass_overlap_mode: "later",
+    advanced_two_pass_overlap_blend: "linear",
+  };
+  const shouldMigrateLegacyAdvancedDefaults = !hasCurrentAdvancedTwoPassDefaults
+    && Object.entries(legacyAdvancedDefaults).every(([key, value]) => (
+      source[key] == null || String(source[key]) === String(value)
+    ));
+  const advancedSource = shouldMigrateLegacyAdvancedDefaults ? {} : source;
   const sourceLoras = Array.isArray(source.loras)
     ? source.loras
     : Array.from({ length: 4 }, (_, index) => ({
@@ -496,6 +527,9 @@ function cloneMiniMaxH3Settings(value = {}) {
     video_mode: normalizeMiniMaxH3Mode(source.video_mode || source.mode || DEFAULT_MINIMAX_H3_SETTINGS.video_mode),
     audio_mode: normalizeMiniMaxH3AudioMode(source.audio_mode || source.audioMode || DEFAULT_MINIMAX_H3_SETTINGS.audio_mode),
     continuity_mode: normalizeMiniMaxH3ContinuityMode(source.continuity_mode || source.continuityMode || DEFAULT_MINIMAX_H3_SETTINGS.continuity_mode),
+    latent_context_frames: [16, 22, 39, 56].includes(Number(source.latent_context_frames ?? source.latentContextFrames))
+      ? Number(source.latent_context_frames ?? source.latentContextFrames)
+      : DEFAULT_MINIMAX_H3_SETTINGS.latent_context_frames,
     diffusion_model_name: String(source.diffusion_model_name || DEFAULT_MINIMAX_H3_SETTINGS.diffusion_model_name),
     clip_name: String(source.clip_name || DEFAULT_MINIMAX_H3_SETTINGS.clip_name),
     video_vae_name: String(source.video_vae_name || DEFAULT_MINIMAX_H3_SETTINGS.video_vae_name),
@@ -538,6 +572,9 @@ function cloneMiniMaxH3Settings(value = {}) {
       : DEFAULT_MINIMAX_H3_SETTINGS.two_pass_latent_upscale_scale))),
     two_pass_latent_upscaler_name: String(source.two_pass_latent_upscaler_name || DEFAULT_MINIMAX_H3_SETTINGS.two_pass_latent_upscaler_name),
     two_pass_use_te_speed: Boolean(source.two_pass_use_te_speed ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_te_speed),
+    two_pass_use_feedforward: Boolean(source.two_pass_use_feedforward ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_feedforward),
+    two_pass_use_block_sparse_attention: Boolean(source.two_pass_use_block_sparse_attention ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_block_sparse_attention),
+    two_pass_use_fast_vae_decode: Boolean(source.two_pass_use_fast_vae_decode ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_fast_vae_decode),
     two_pass_te_speed_processing_control: Math.max(0, Math.min(1, Number(source.two_pass_te_speed_processing_control ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_processing_control))),
     two_pass_te_speed_start_percent: Math.max(0, Math.min(1, Number(source.two_pass_te_speed_start_percent ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_start_percent))),
     two_pass_te_speed_end_percent: Math.max(0, Math.min(1, Number(source.two_pass_te_speed_end_percent ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_end_percent))),
@@ -546,29 +583,29 @@ function cloneMiniMaxH3Settings(value = {}) {
     two_pass_te_speed_device: String(source.two_pass_te_speed_device || DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_device),
     two_pass_final_resize_method: String(source.two_pass_final_resize_method || DEFAULT_MINIMAX_H3_SETTINGS.two_pass_final_resize_method),
     two_pass_output_crf: Math.max(0, Math.min(100, Math.trunc(Number(source.two_pass_output_crf ?? DEFAULT_MINIMAX_H3_SETTINGS.two_pass_output_crf)))),
-    advanced_two_pass_vram_preset: ["8gb", "12gb", "16gb", "24gb", "custom"].includes(String(source.advanced_two_pass_vram_preset || "").toLowerCase())
-      ? String(source.advanced_two_pass_vram_preset).toLowerCase()
+    advanced_two_pass_vram_preset: ["8gb", "12gb", "16gb", "24gb", "custom"].includes(String(advancedSource.advanced_two_pass_vram_preset || "").toLowerCase())
+      ? String(advancedSource.advanced_two_pass_vram_preset).toLowerCase()
       : DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_vram_preset,
-    advanced_two_pass_tile_size_mode: ["specific_size", "rows_cols"].includes(String(source.advanced_two_pass_tile_size_mode || "").toLowerCase())
-      ? String(source.advanced_two_pass_tile_size_mode).toLowerCase()
+    advanced_two_pass_tile_size_mode: ["specific_size", "rows_cols"].includes(String(advancedSource.advanced_two_pass_tile_size_mode || "").toLowerCase())
+      ? String(advancedSource.advanced_two_pass_tile_size_mode).toLowerCase()
       : DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_tile_size_mode,
-    advanced_two_pass_tile_width: Math.max(32, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_tile_width ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_tile_width)))),
-    advanced_two_pass_tile_height: Math.max(32, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_tile_height ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_tile_height)))),
-    advanced_two_pass_grid_rows: Math.max(1, Math.min(9, Math.trunc(Number(source.advanced_two_pass_grid_rows ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_grid_rows)))),
-    advanced_two_pass_grid_cols: Math.max(1, Math.min(9, Math.trunc(Number(source.advanced_two_pass_grid_cols ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_grid_cols)))),
-    advanced_two_pass_chunk_length: Math.max(17, Math.min(100000, Math.trunc(Number(source.advanced_two_pass_chunk_length ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_chunk_length)))),
-    advanced_two_pass_temporal_overlap: Math.max(0, Math.min(100000, Math.trunc(Number(source.advanced_two_pass_temporal_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_temporal_overlap)))),
-    advanced_two_pass_anchor_strength: Math.max(0, Math.min(1, Number(source.advanced_two_pass_anchor_strength ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_anchor_strength))),
-    advanced_two_pass_spatial_w_overlap: Math.max(0, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_spatial_w_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_spatial_w_overlap)))),
-    advanced_two_pass_spatial_h_overlap: Math.max(0, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_spatial_h_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_spatial_h_overlap)))),
-    advanced_two_pass_fade_width: Math.max(0, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_fade_width ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_fade_width)))),
-    advanced_two_pass_fade_height: Math.max(0, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_fade_height ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_fade_height)))),
-    advanced_two_pass_min_tile_size: Math.max(0, Math.min(16384, Math.trunc(Number(source.advanced_two_pass_min_tile_size ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_min_tile_size)))),
-    advanced_two_pass_overlap_mode: ["earlier", "later"].includes(String(source.advanced_two_pass_overlap_mode || "").toLowerCase())
-      ? String(source.advanced_two_pass_overlap_mode).toLowerCase()
+    advanced_two_pass_tile_width: Math.max(32, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_tile_width ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_tile_width)))),
+    advanced_two_pass_tile_height: Math.max(32, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_tile_height ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_tile_height)))),
+    advanced_two_pass_grid_rows: Math.max(1, Math.min(9, Math.trunc(Number(advancedSource.advanced_two_pass_grid_rows ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_grid_rows)))),
+    advanced_two_pass_grid_cols: Math.max(1, Math.min(9, Math.trunc(Number(advancedSource.advanced_two_pass_grid_cols ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_grid_cols)))),
+    advanced_two_pass_chunk_length: Math.max(17, Math.min(100000, Math.trunc(Number(advancedSource.advanced_two_pass_chunk_length ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_chunk_length)))),
+    advanced_two_pass_temporal_overlap: Math.max(0, Math.min(100000, Math.trunc(Number(advancedSource.advanced_two_pass_temporal_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_temporal_overlap)))),
+    advanced_two_pass_anchor_strength: Math.max(0, Math.min(1, Number(advancedSource.advanced_two_pass_anchor_strength ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_anchor_strength))),
+    advanced_two_pass_spatial_w_overlap: Math.max(0, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_spatial_w_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_spatial_w_overlap)))),
+    advanced_two_pass_spatial_h_overlap: Math.max(0, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_spatial_h_overlap ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_spatial_h_overlap)))),
+    advanced_two_pass_fade_width: Math.max(0, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_fade_width ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_fade_width)))),
+    advanced_two_pass_fade_height: Math.max(0, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_fade_height ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_fade_height)))),
+    advanced_two_pass_min_tile_size: Math.max(0, Math.min(16384, Math.trunc(Number(advancedSource.advanced_two_pass_min_tile_size ?? DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_min_tile_size)))),
+    advanced_two_pass_overlap_mode: ["earlier", "later"].includes(String(advancedSource.advanced_two_pass_overlap_mode || "").toLowerCase())
+      ? String(advancedSource.advanced_two_pass_overlap_mode).toLowerCase()
       : DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_overlap_mode,
-    advanced_two_pass_overlap_blend: ["linear", "smoothstep", "overwrite", "midpoint"].includes(String(source.advanced_two_pass_overlap_blend || "").toLowerCase())
-      ? String(source.advanced_two_pass_overlap_blend).toLowerCase()
+    advanced_two_pass_overlap_blend: ["linear", "smoothstep", "overwrite", "midpoint"].includes(String(advancedSource.advanced_two_pass_overlap_blend || "").toLowerCase())
+      ? String(advancedSource.advanced_two_pass_overlap_blend).toLowerCase()
       : DEFAULT_MINIMAX_H3_SETTINGS.advanced_two_pass_overlap_blend,
     advanced_two_pass_upscaler_device: ["cuda", "cpu"].includes(String(source.advanced_two_pass_upscaler_device || "").toLowerCase())
       ? String(source.advanced_two_pass_upscaler_device).toLowerCase()
@@ -655,6 +692,7 @@ const VIDEO_BUILDER_CUSTOM_NODES = [
   { id: "te_speed_minimax_h3", label: "TE-Speed-MiniMaxH3-OSS", note: "Optional MiniMax H3 acceleration node used by the TE-Speed setting in two-pass workflows.", url: "https://github.com/HELPMEEADICE/TE-Speed-MiniMaxH3-OSS" },
   { id: "mmh3_ultimate_upscale", label: "Comfyui-MMH3-UltimateUpscale", note: "Optional MiniMax H3 advanced upscale node used by the advanced upscale/refinement path.", url: "https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale" },
   { id: "minimax_h3_audio_t8", label: "comfyui-minimax-h3-audio-T8", note: "Required by MiniMax H3 Ref to Video 2 Pass for audio/video latent separation.", url: "https://github.com/T8mars/comfyui-minimax-h3-audio-T8" },
+  { id: "minimax_h3_latent_upscaler", label: "Comfyui_Minimax_h3_latent_Upscaler", note: "Required by MiniMax H3 Ref to Video 2 Pass and the experimental video upscaler. The latent-upscaler checkpoint must also be installed separately.", url: "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler" },
 ];
 const ZIMAGE_MODEL_DOWNLOADS = [
   { label: "Z-Image Turbo", url: "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors" },
@@ -3098,6 +3136,9 @@ function openBuilder(node) {
   console.log(`[VRGDG Music Builder] UI version ${BUILDER_UI_VERSION}`);
   const overlay = document.createElement("div");
   let builderKeydownHandler = null;
+  let builderResourceTimer = 0;
+  let builderResourceController = null;
+  let builderResourceResizeObserver = null;
   overlay.dataset.vrgdgThemeRoot = "true";
   overlay.style.cssText = `position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;font-family:${BUILDER_FONT_STACK};`;
   const shell = document.createElement("div");
@@ -3390,6 +3431,9 @@ function openBuilder(node) {
   const closeBuilderNow = () => {
     pauseAllAudio();
     if (!previewVideo.paused) previewVideo.pause();
+    clearTimeout(builderResourceTimer);
+    builderResourceController?.abort();
+    builderResourceResizeObserver?.disconnect();
     window.removeEventListener("vrgdg:builder-toast", toastNotificationHandler);
     if (builderKeydownHandler) document.removeEventListener("keydown", builderKeydownHandler, true);
     restoreBrowserAiDownloadsQuietly().catch(() => null);
@@ -3605,8 +3649,73 @@ function openBuilder(node) {
   importActions.style.cssText = "display:flex;gap:5px;align-items:center;justify-content:center;flex-wrap:nowrap;min-width:0;overflow:visible;";
   importActions.append(wizardButton, autoBuildButton, storyboardBuilderButton, fluxReferenceBuilderButton, lyricMapperButton, gemmaRunnerButton, promptOptionsButton);
   const centerActions = document.createElement("div");
-  centerActions.style.cssText = "display:flex;gap:8px;align-items:center;justify-content:center;min-width:0;overflow:visible;";
+  centerActions.style.cssText = "position:relative;display:flex;gap:8px;align-items:center;justify-content:center;min-width:0;overflow:visible;";
   centerActions.append(importActions, batchActions);
+  const builderResourceMonitor = document.createElement("div");
+  builderResourceMonitor.setAttribute("aria-label", "Video Builder RAM and VRAM usage");
+  builderResourceMonitor.style.cssText = `position:absolute;right:0;top:50%;transform:translateY(-50%);display:none;align-items:center;gap:10px;width:250px;height:42px;box-sizing:border-box;padding:5px 9px;border:1px solid #3f3f46;border-radius:7px;background:#18181b;color:#d4d4d8;font-family:${BUILDER_FONT_STACK};font-size:10px;line-height:1.25;pointer-events:auto;`;
+  builderResourceMonitor.innerHTML = `
+    <div style="flex:1 1 0;min-width:0;">
+      <div style="display:flex;justify-content:space-between;gap:6px;"><span>VRAM</span><strong data-builder-resource-value="vram" style="color:#67e8f9;font-weight:600;white-space:nowrap;">—</strong></div>
+      <div style="height:3px;margin-top:4px;overflow:hidden;border-radius:3px;background:#3f3f46;"><i data-builder-resource-bar="vram" style="display:block;width:0;height:100%;background:#06b6d4;"></i></div>
+    </div>
+    <div style="flex:1 1 0;min-width:0;">
+      <div style="display:flex;justify-content:space-between;gap:6px;"><span>RAM</span><strong data-builder-resource-value="ram" style="color:#c4b5fd;font-weight:600;white-space:nowrap;">—</strong></div>
+      <div style="height:3px;margin-top:4px;overflow:hidden;border-radius:3px;background:#3f3f46;"><i data-builder-resource-bar="ram" style="display:block;width:0;height:100%;background:#8b5cf6;"></i></div>
+    </div>
+  `;
+  builderResourceMonitor.title = "RAM and VRAM on the machine running ComfyUI. Updated every two seconds.";
+  centerActions.append(builderResourceMonitor);
+
+  const renderBuilderResourceMetric = (key, memory) => {
+    const value = builderResourceMonitor.querySelector(`[data-builder-resource-value="${key}"]`);
+    const bar = builderResourceMonitor.querySelector(`[data-builder-resource-bar="${key}"]`);
+    const used = Number(memory?.used);
+    const total = Number(memory?.total);
+    const valid = Number.isFinite(used) && Number.isFinite(total) && total > 0;
+    const usage = valid ? Math.max(0, Math.min(100, used / total * 100)) : 0;
+    value.textContent = valid ? `${(used / 2 ** 30).toFixed(1)}/${(total / 2 ** 30).toFixed(1)} GB` : "—";
+    value.title = valid ? `${usage.toFixed(1)}% used` : "Reading unavailable";
+    bar.style.width = `${usage}%`;
+  };
+  const positionBuilderResourceMonitor = () => {
+    const centerBounds = centerActions.getBoundingClientRect();
+    const actionBounds = importActions.getBoundingClientRect();
+    const availableRight = centerBounds.right - actionBounds.right;
+    builderResourceMonitor.style.display = availableRight >= 265 ? "flex" : "none";
+  };
+  const pollBuilderResources = async () => {
+    if (!overlay.isConnected || builderResourceController) return;
+    builderResourceController = new AbortController();
+    const timeout = setTimeout(() => builderResourceController?.abort(), 5000);
+    try {
+      const response = await api.fetchApi("/vrgdg/resource-monitor", {
+        signal: builderResourceController.signal,
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const selectedGpu = String(app.extensionManager.setting.get("VRGDG.ResourceMonitor.GPU") ?? 0);
+      const gpu = Array.isArray(data?.gpus)
+        ? (data.gpus.find((item) => String(item?.index) === selectedGpu) || data.gpus[0])
+        : null;
+      renderBuilderResourceMetric("vram", gpu);
+      renderBuilderResourceMetric("ram", data?.ram);
+      builderResourceMonitor.title = gpu
+        ? `GPU ${gpu.index} · ${gpu.name} · RAM and VRAM on the machine running ComfyUI`
+        : "RAM is available. VRAM requires NVIDIA nvidia-smi.";
+    } catch {
+      if (overlay.isConnected) {
+        renderBuilderResourceMetric("vram", null);
+        renderBuilderResourceMetric("ram", null);
+        builderResourceMonitor.title = "Resource monitor unavailable. Restart ComfyUI after installing the monitor.";
+      }
+    } finally {
+      clearTimeout(timeout);
+      builderResourceController = null;
+      if (overlay.isConnected) builderResourceTimer = setTimeout(pollBuilderResources, 2000);
+    }
+  };
   const utilityActions = document.createElement("div");
   utilityActions.style.cssText = "display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:nowrap;min-width:max-content;";
   const projectVideoEngineBadge = document.createElement("div");
@@ -6049,6 +6158,21 @@ function openBuilder(node) {
   const miniMaxAudioVaePicker = makeSearchableLoraPicker(DEFAULT_MINIMAX_H3_SETTINGS.audio_vae_name);
   const miniMaxAudioMode = makeSelect(MINIMAX_H3_AUDIO_MODE_OPTIONS, DEFAULT_MINIMAX_H3_SETTINGS.audio_mode);
   const miniMaxContinuityMode = makeSelect(MINIMAX_H3_CONTINUITY_OPTIONS, DEFAULT_MINIMAX_H3_SETTINGS.continuity_mode);
+  const MINIMAX_H3_LATENT_CONTEXT_OPTIONS = [
+    { value: "16", label: "16 frames (5 tokens)" },
+    { value: "22", label: "22 frames (7 tokens — recommended)" },
+    { value: "39", label: "39 frames (12 tokens)" },
+    { value: "56", label: "56 frames (17 tokens)" },
+  ];
+  const miniMaxLatentContextFrames = makeSelect(MINIMAX_H3_LATENT_CONTEXT_OPTIONS, String(DEFAULT_MINIMAX_H3_SETTINGS.latent_context_frames || 22));
+  miniMaxLatentContextFrames.title = "Number of trailing context frames loaded directly from the predecessor scene's saved latent.";
+  const miniMaxLatentContextField = makeField("Latent context frames", miniMaxLatentContextFrames);
+  const miniMaxLatentStatusPill = document.createElement("div");
+  miniMaxLatentStatusPill.style.cssText = "display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;border-radius:12px;padding:4px 10px;border:1px solid #334155;background:#0f172a;color:#94a3b8;margin-top:2px;";
+  miniMaxLatentStatusPill.textContent = "Checking predecessor latent...";
+  const miniMaxLatentContinuationRow = document.createElement("div");
+  miniMaxLatentContinuationRow.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:6px;";
+  miniMaxLatentContinuationRow.append(miniMaxLatentContextField, miniMaxLatentStatusPill);
   const miniMaxContinuityNote = document.createElement("div");
   miniMaxContinuityNote.style.cssText = "font-size:11px;color:#a1a1aa;line-height:1.4;";
   const miniMaxNoGgufNote = document.createElement("div");
@@ -6320,6 +6444,9 @@ function openBuilder(node) {
   ], DEFAULT_MINIMAX_H3_SETTINGS.ref_image_size);
   const miniMaxTwoPassLatentUpscalerPicker = makeSearchableLoraPicker(DEFAULT_MINIMAX_H3_SETTINGS.two_pass_latent_upscaler_name);
   const miniMaxTwoPassUseTeSpeed = makeCheckbox("Use TE-Speed-MiniMaxH3 (OSS)", DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_te_speed);
+  const miniMaxTwoPassUseFeedforward = makeCheckbox("Use FeedForward (lower VRAM for longer scenes)", DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_feedforward);
+  const miniMaxTwoPassUseBlockSparseAttention = makeCheckbox("Use Block Sparse Attention (faster)", DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_block_sparse_attention);
+  const miniMaxTwoPassUseFastVaeDecode = makeCheckbox("Use Fast Batched VAE Decode (batch size 8)", DEFAULT_MINIMAX_H3_SETTINGS.two_pass_use_fast_vae_decode);
   const miniMaxTwoPassTeProcessingControl = makeInput(String(DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_processing_control), "number");
   miniMaxTwoPassTeProcessingControl.min = "0"; miniMaxTwoPassTeProcessingControl.max = "1"; miniMaxTwoPassTeProcessingControl.step = "0.01";
   const miniMaxTwoPassTeStart = makeInput(String(DEFAULT_MINIMAX_H3_SETTINGS.two_pass_te_speed_start_percent), "number");
@@ -6347,6 +6474,9 @@ function openBuilder(node) {
     makeField("Reference image sizing", miniMaxTwoPassRefImageSize, "Controls the MiniMax H3 reference-conditioning image-size mode. Default: max."),
     makeField("Latent upscaler model", miniMaxTwoPassLatentUpscalerPicker.wrapper),
     miniMaxTwoPassUseTeSpeed.wrapper,
+    miniMaxTwoPassUseFeedforward.wrapper,
+    miniMaxTwoPassUseBlockSparseAttention.wrapper,
+    miniMaxTwoPassUseFastVaeDecode.wrapper,
     ...twoPassControls.map((item) => item.section),
     makeSettingsSection("TE-Speed Advanced", [
       makeField("Processing control", miniMaxTwoPassTeProcessingControl),
@@ -6644,6 +6774,7 @@ function openBuilder(node) {
         ]),
         makeSettingsSection("Between-scene continuity", [
           makeField("Previous rendered final frame", miniMaxContinuityMode),
+          miniMaxLatentContinuationRow,
           miniMaxContinuityNote,
         ]),
         miniMaxLoraSection,
@@ -6912,10 +7043,13 @@ function openBuilder(node) {
   preview.append(previewStage, globalScrubWrap);
   const timelineInfo = document.createElement("div");
   timelineInfo.textContent = "No audio loaded";
-  timelineInfo.style.cssText = "color:#67e8f9;font-variant-numeric:tabular-nums;min-width:180px;flex:1 0 180px;";
+  timelineInfo.style.cssText = "color:#67e8f9;font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto;";
   const timelineRangeInfo = document.createElement("div");
   timelineRangeInfo.textContent = "Range: none";
-  timelineRangeInfo.style.cssText = "color:#a5f3fc;font-variant-numeric:tabular-nums;min-width:220px;flex:0 0 auto;";
+  timelineRangeInfo.style.cssText = "color:#a5f3fc;font-variant-numeric:tabular-nums;white-space:nowrap;flex:0 0 auto;";
+  const timelineStatusInfo = document.createElement("div");
+  timelineStatusInfo.style.cssText = "display:flex;align-items:center;gap:12px;flex:0 0 auto;min-width:max-content;padding:0 4px;";
+  timelineStatusInfo.append(timelineInfo, timelineRangeInfo);
   const selectedMediaTools = document.createElement("div");
   selectedMediaTools.style.cssText = "margin-left:auto;display:flex;gap:8px;align-items:center;border:1px solid #27272a;border-radius:6px;background:#111113;padding:6px 8px;";
   const selectedMediaLabel = document.createElement("span");
@@ -6958,7 +7092,7 @@ function openBuilder(node) {
   addSegmentButton.textContent = "+ Segment";
   addOverlaySegmentButton.textContent = "+ Overlay Track";
   timelineToolRail.append(bulkSegmentsButton, sceneNoteButton, videoNoteButton, lyricNoteButton, addTimelineMarkerButton, addSegmentButton, addOverlaySegmentButton);
-  timelineHeader.append(setInButton, setOutButton, clearRangeButton, closeTimelineGapsButton, snapSceneEdgeButton, splitSceneButton, idLoraTrimModeButton, overlayTrackToggleButton, overlayTrackHintButton, undoButton, redoButton, playButton, stopButton, multiSelectButton, multiSelectHintButton, waveformModeSelect, snapToBeatsControl.wrapper, beatMarkersButton, zoomWrap, timelineInfo, timelineRangeInfo, deleteSegmentButton, deleteAllSegmentsButton, selectedMediaTools);
+  timelineHeader.append(setInButton, setOutButton, clearRangeButton, closeTimelineGapsButton, snapSceneEdgeButton, idLoraTrimModeButton, overlayTrackToggleButton, overlayTrackHintButton, undoButton, redoButton, playButton, stopButton, multiSelectButton, multiSelectHintButton, waveformModeSelect, snapToBeatsControl.wrapper, beatMarkersButton, zoomWrap, timelineStatusInfo, deleteSegmentButton, deleteAllSegmentsButton, selectedMediaTools);
   const timelineBody = document.createElement("div");
   timelineBody.style.cssText = "display:grid;grid-template-columns:auto minmax(0,1fr);min-height:0;overflow:hidden;";
   const timelineViewport = document.createElement("div");
@@ -6994,6 +7128,11 @@ function openBuilder(node) {
   shell.append(shellHeader, main, timeline);
   overlay.append(shell);
   document.body.append(overlay);
+  builderResourceResizeObserver = new ResizeObserver(positionBuilderResourceMonitor);
+  builderResourceResizeObserver.observe(centerActions);
+  builderResourceResizeObserver.observe(importActions);
+  positionBuilderResourceMonitor();
+  void pollBuilderResources();
   refreshV10UpdateStatus();
   installFileDropNavigationGuard(shell);
   window.VRGDG_UIThemes?.registerRoot?.(overlay);
@@ -7678,6 +7817,22 @@ function openBuilder(node) {
     return mode;
   }
 
+  function clearMiniMaxImageReferenceStartFrameOnModeSwitch(segment, targetMode) {
+    if (normalizeMiniMaxH3Mode(targetMode) !== "reference_to_video") return;
+    if (miniMaxH3ModeForSegment(segment) !== "image_reference_to_video") return;
+    const sceneLocked = Boolean(segment?.use_scene_minimax_h3_settings);
+    const targets = (sceneLocked ? [segment] : allEditableSegments()).filter((item) => (
+      item
+      && segmentTrack(item) !== "overlay"
+      && !(!sceneLocked && item.use_scene_minimax_h3_settings)
+      && miniMaxH3ModeForSegment(item) === "image_reference_to_video"
+    ));
+    for (const item of targets) {
+      item.minimax_h3_scene_image_use = "off";
+      item.minimax_h3_use_scene_image_as_start_frame = false;
+    }
+  }
+
   function syncMiniMaxReferenceButtons() {
     const segment = activeSegment();
     const miniMaxProject = normalizeProjectVideoEngine(state.projectVideoEngine) === "minimax_h3";
@@ -7735,6 +7890,7 @@ function openBuilder(node) {
       video_mode: currentSettings.video_mode,
       audio_mode: miniMaxAudioMode.value,
       continuity_mode: miniMaxContinuityMode.value,
+      latent_context_frames: Number(miniMaxLatentContextFrames.value || 22),
       diffusion_model_name: miniMaxDiffusionModelPicker.input.value,
       clip_name: miniMaxClipPicker.input.value,
       video_vae_name: miniMaxVideoVaePicker.input.value,
@@ -7766,6 +7922,9 @@ function openBuilder(node) {
       two_pass_use_te_speed: state.miniMaxH3ThreePassEnabled
         ? miniMaxAdvancedUseTeSpeed.input.checked
         : miniMaxTwoPassUseTeSpeed.input.checked,
+      two_pass_use_feedforward: miniMaxTwoPassUseFeedforward.input.checked,
+      two_pass_use_block_sparse_attention: miniMaxTwoPassUseBlockSparseAttention.input.checked,
+      two_pass_use_fast_vae_decode: miniMaxTwoPassUseFastVaeDecode.input.checked,
       two_pass_te_speed_processing_control: miniMaxTwoPassTeProcessingControl.value,
       two_pass_te_speed_start_percent: miniMaxTwoPassTeStart.value,
       two_pass_te_speed_end_percent: miniMaxTwoPassTeEnd.value,
@@ -8454,6 +8613,70 @@ function openBuilder(node) {
     });
   }
 
+  let miniMaxLatentCheckCounter = 0;
+  async function updateMiniMaxLatentPredecessorStatus(segment) {
+    const checkId = ++miniMaxLatentCheckCounter;
+    if (!segment) {
+      miniMaxLatentStatusPill.style.display = "none";
+      return;
+    }
+    const continuityMode = normalizeMiniMaxH3ContinuityMode(miniMaxContinuityMode.value);
+    if (!isMiniMaxH3LatentContinuationMode(continuityMode)) {
+      miniMaxLatentStatusPill.style.display = "none";
+      return;
+    }
+    miniMaxLatentStatusPill.style.display = "inline-flex";
+    const slotNumber = sceneSlotNumber(segment);
+    if (slotNumber <= 1) {
+      miniMaxLatentStatusPill.textContent = "Scene 1 has no predecessor — starts fresh and saves latent on render";
+      miniMaxLatentStatusPill.style.borderColor = "#0284c7";
+      miniMaxLatentStatusPill.style.background = "#0c4a6e";
+      miniMaxLatentStatusPill.style.color = "#38bdf8";
+      return;
+    }
+    const projectFolder = String(projectInput.value || state.projectFolder || "").trim();
+    if (!projectFolder) {
+      miniMaxLatentStatusPill.textContent = "Set project folder to check predecessor latent";
+      miniMaxLatentStatusPill.style.borderColor = "#334155";
+      miniMaxLatentStatusPill.style.background = "#0f172a";
+      miniMaxLatentStatusPill.style.color = "#94a3b8";
+      return;
+    }
+    miniMaxLatentStatusPill.textContent = `Checking Scene ${slotNumber - 1} latent status...`;
+    miniMaxLatentStatusPill.style.borderColor = "#334155";
+    miniMaxLatentStatusPill.style.background = "#0f172a";
+    miniMaxLatentStatusPill.style.color = "#94a3b8";
+    try {
+      const resp = await postJson("/vrgdg/music_builder/check_latent_predecessor", {
+        project_folder: projectFolder,
+        scene_number: slotNumber,
+      }, 5000);
+      if (checkId !== miniMaxLatentCheckCounter) return;
+      if (resp?.predecessor_exists) {
+        const dirtyNote = resp.dirty ? " (marked dirty)" : "";
+        // Exact Last Frame needs the predecessor's tail-padding info to find its real last frame in the latent.
+        const needsRerender = continuityMode === "latent_continuation_exact_frame" && !resp.tail_padding_known;
+        const rerenderNote = needsRerender ? " — no tail info, re-render it for an exact seam" : "";
+        miniMaxLatentStatusPill.textContent = `Predecessor Scene ${resp.predecessor_scene} latent ready (${resp.frame_count} frames, ${resp.token_count} tokens)${dirtyNote}${rerenderNote}`;
+        const warn = resp.dirty || needsRerender;
+        miniMaxLatentStatusPill.style.borderColor = warn ? "#b45309" : "#166534";
+        miniMaxLatentStatusPill.style.background = warn ? "#451a03" : "#052e16";
+        miniMaxLatentStatusPill.style.color = warn ? "#fbbf24" : "#4ade80";
+      } else {
+        miniMaxLatentStatusPill.textContent = `Scene ${resp.predecessor_scene} latent missing — render Scene ${resp.predecessor_scene} first`;
+        miniMaxLatentStatusPill.style.borderColor = "#991b1b";
+        miniMaxLatentStatusPill.style.background = "#450a0a";
+        miniMaxLatentStatusPill.style.color = "#f87171";
+      }
+    } catch (e) {
+      if (checkId !== miniMaxLatentCheckCounter) return;
+      miniMaxLatentStatusPill.textContent = `Could not verify Scene ${slotNumber - 1} latent`;
+      miniMaxLatentStatusPill.style.borderColor = "#475569";
+      miniMaxLatentStatusPill.style.background = "#1e293b";
+      miniMaxLatentStatusPill.style.color = "#cbd5e1";
+    }
+  }
+
   function syncMiniMaxH3Panel() {
     const miniMaxProject = normalizeProjectVideoEngine(state.projectVideoEngine) === "minimax_h3";
     const segment = activeSegment();
@@ -8466,6 +8689,7 @@ function openBuilder(node) {
     miniMaxAudioVaePicker.input.value = settings.audio_vae_name;
     miniMaxAudioMode.value = settings.audio_mode;
     miniMaxContinuityMode.value = settings.continuity_mode;
+    miniMaxLatentContextFrames.value = String(segment?.minimax_h3_latent_context_frames || settings.latent_context_frames || 22);
     miniMaxAspectRatio.value = settings.aspect_ratio;
     miniMaxMegapixels.value = String(settings.megapixels);
     miniMaxSeed.value = String(settings.seed);
@@ -8487,6 +8711,9 @@ function openBuilder(node) {
     miniMaxAdvancedLatentUpscalerPicker.input.value = settings.two_pass_latent_upscaler_name;
     miniMaxTwoPassUseTeSpeed.input.checked = Boolean(settings.two_pass_use_te_speed);
     miniMaxAdvancedUseTeSpeed.input.checked = Boolean(settings.two_pass_use_te_speed);
+    miniMaxTwoPassUseFeedforward.input.checked = Boolean(settings.two_pass_use_feedforward);
+    miniMaxTwoPassUseBlockSparseAttention.input.checked = Boolean(settings.two_pass_use_block_sparse_attention);
+    miniMaxTwoPassUseFastVaeDecode.input.checked = Boolean(settings.two_pass_use_fast_vae_decode);
     miniMaxTwoPassTeProcessingControl.value = String(settings.two_pass_te_speed_processing_control);
     miniMaxTwoPassTeStart.value = String(settings.two_pass_te_speed_start_percent);
     miniMaxTwoPassTeEnd.value = String(settings.two_pass_te_speed_end_percent);
@@ -8683,25 +8910,39 @@ function openBuilder(node) {
       : "Uses custom scene audio or project audio unchanged for exact timing and lip sync. Native voice presets are hidden while Input Audio is selected.";
     const continuitySupported = ["reference_to_video", "video_to_video"].includes(mode);
     miniMaxContinuityMode.disabled = !continuitySupported;
+    const isLatentContinuation = isMiniMaxH3LatentContinuationMode(settings.continuity_mode);
+    const isLatentExactFrame = settings.continuity_mode === "latent_continuation_exact_frame";
+    miniMaxLatentContinuationRow.style.display = (continuitySupported && isLatentContinuation) ? "flex" : "none";
+    miniMaxLatentContextFrames.disabled = !continuitySupported || !isLatentContinuation;
     miniMaxContinuityNote.textContent = !continuitySupported
       ? "Available in Reference to Video and Video to Video. Those modes can receive the prior clip's extracted final frame as one additional reference image."
+      : isLatentExactFrame
+        ? `Latent Continuation + Exact Last Frame: loads about ${miniMaxLatentContextFrames.value} trailing frames of the predecessor's saved latent as temporal context, cut before any padding after its real end, and pins an image of the predecessor's exact last frame as the final warm-up frame. The warm-up is trimmed from the video and audio together. The predecessor must have been rendered with this version (it records the padding).`
+      : isLatentContinuation
+        ? `Latent Continuation: Loads ${miniMaxLatentContextFrames.value} trailing frames directly from the predecessor scene's saved latent tensor as native temporal context into MiniMax H3, bypassing pixel VAE re-encoding.`
       : settings.continuity_mode === "spatial_reference"
         ? "Recommended for a new camera angle. Preserves character blocking, orientation, screen direction, props, and environment layout without forcing the same opening composition. The extracted frame and its prompt contract are injected when rendering; Scene 1 is unaffected."
         : settings.continuity_mode === "exact_start_frame"
           ? "Begins each later scene on the previous rendered clip's exact final frame. The extracted frame and its prompt contract are injected when rendering. Do not also enable the scene-image exact start-frame option; Scene 1 is unaffected."
           : "Off: every scene starts independently from its normal MiniMax references.";
+    if (continuitySupported && isLatentContinuation) {
+      updateMiniMaxLatentPredecessorStatus(segment);
+    } else {
+      miniMaxLatentStatusPill.style.display = "none";
+    }
     const sceneImageUse = miniMaxH3SceneImageUseForSegment(segment);
     miniMaxSceneImageUse.value = imageReferenceTwoPass ? "exact_start_frame" : sceneImageUse;
     miniMaxSceneImageUse.disabled = !segment || imageReferenceTwoPass;
     const exactStartFrameOption = Array.from(miniMaxSceneImageUse.options).find((option) => option.value === "exact_start_frame");
-    if (exactStartFrameOption) exactStartFrameOption.disabled = settings.continuity_mode === "exact_start_frame";
+    if (exactStartFrameOption) exactStartFrameOption.disabled = settings.continuity_mode === "exact_start_frame" || isLatentContinuation;
     const startFrameCharacterInfluence = miniMaxH3StartFrameCharacterInfluenceForSegment(segment);
     miniMaxStartFrameCharacterInfluence.value = startFrameCharacterInfluence;
     miniMaxStartFrameCharacterInfluence.disabled = !segment
       || sceneImageUse !== "exact_start_frame"
-      || settings.continuity_mode === "exact_start_frame";
+      || settings.continuity_mode === "exact_start_frame"
+      || isLatentContinuation;
     miniMaxStartFrameCharacterInfluenceField.style.display = hasSceneImage && sceneImageUse === "exact_start_frame" ? "flex" : "none";
-    miniMaxStartFrameReferenceNote.textContent = settings.continuity_mode === "exact_start_frame"
+    miniMaxStartFrameReferenceNote.textContent = (settings.continuity_mode === "exact_start_frame" || isLatentContinuation)
       && sceneImageUse === "exact_start_frame"
       ? "The previous rendered final frame is the sole exact opening frame. Choose an LLM-only inspiration mode or Do not use instead."
       : sceneImageUse === "environment_inspiration"
@@ -11984,6 +12225,9 @@ function openBuilder(node) {
     segment.minimax_h3_continuity_source_scene_id = String(segment.minimax_h3_continuity_source_scene_id || "");
     segment.minimax_h3_continuity_mode_used = normalizeMiniMaxH3ContinuityMode(segment.minimax_h3_continuity_mode_used);
     segment.minimax_h3_continuity_image_number = Math.max(0, Math.trunc(Number(segment.minimax_h3_continuity_image_number || 0)));
+    segment.minimax_h3_latent_context_frames = [16, 22, 39, 56].includes(Number(segment.minimax_h3_latent_context_frames))
+      ? Number(segment.minimax_h3_latent_context_frames)
+      : (DEFAULT_MINIMAX_H3_SETTINGS.latent_context_frames || 22);
     segment.minimax_h3_video_references = (Array.isArray(segment.minimax_h3_video_references) ? segment.minimax_h3_video_references : [])
       .slice(0, 3)
       .map((item) => ({
@@ -12854,7 +13098,7 @@ function openBuilder(node) {
     state.builderStoryLayer = normalizeBuilderStoryLayer(data.builderStoryLayer || data.builder_story_layer || {});
     state.builderStoryboardDefaults = normalizeBuilderStoryboardDefaults(data.builderStoryboardDefaults || data.builder_storyboard_defaults || {});
     state.autoBuildPreparation = normalizeAutoBuildPreparation(data.autoBuildPreparation || data.auto_build_preparation || {});
-    state.lyricMapper = normalizeLyricMapper(data.lyricMapper || data.lyric_mapper || state.lyricMapper);
+    state.lyricMapper = normalizeLyricMapper(data.lyricMapper || data.lyric_mapper || {});
     state.zEnhanceSettings = data.zEnhanceSettings || state.zEnhanceSettings;
     state.videoModelMode = data.videoModelMode || data.video_model_mode || state.videoModelMode || "i2v";
     state.i2vVideoSettings = cloneI2VVideoSettings(data.i2vVideoSettings || state.i2vVideoSettings);
@@ -16941,6 +17185,10 @@ function openBuilder(node) {
   function setMiniMaxH3SeedRandom(segment = activeSegment()) {
     const settings = miniMaxH3SettingsForSegment(segment);
     settings.seed = randomSeedValue();
+    settings.two_pass_pass1_seed = randomSeedValue();
+    settings.two_pass_pass2_seed = randomSeedValue();
+    settings.advanced_two_pass_pass1_seed = randomSeedValue();
+    settings.advanced_two_pass_pass2_seed = randomSeedValue();
     if (segment?.use_scene_minimax_h3_settings) {
       segment.minimax_h3_settings = cloneMiniMaxH3Settings(settings);
       segment.minimax_h3_mode = segment.minimax_h3_settings.video_mode;
@@ -20185,6 +20433,14 @@ function openBuilder(node) {
         grainBadge.onpointerdown = (event) => event.stopPropagation();
         block.append(grainBadge);
       }
+      if (!isOverlay && segment._latentDirty) {
+        const dirtyBadge = document.createElement("span");
+        dirtyBadge.textContent = "LATENT DIRTY";
+        dirtyBadge.title = "Predecessor scene was re-rendered or timeline was shifted since this latent was created. Re-rendering this scene is recommended.";
+        dirtyBadge.style.cssText = "position:absolute;left:96px;bottom:5px;min-width:76px;height:18px;display:flex;align-items:center;justify-content:center;border:1px solid #f59e0b;border-radius:4px;background:rgba(120,53,15,.92);color:#fef3c7;font-size:9px;font-weight:900;z-index:3;";
+        dirtyBadge.onpointerdown = (event) => event.stopPropagation();
+        block.append(dirtyBadge);
+      }
       const leftHandle = document.createElement("div");
       leftHandle.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:8px;background:rgba(255,255,255,.25);cursor:ew-resize;z-index:4;";
       const rightHandle = document.createElement("div");
@@ -20360,6 +20616,33 @@ function openBuilder(node) {
       }
     }
     renderBeatMarkersOverlay();
+  }
+
+  async function loadDirtyLatentBadges() {
+    const projectFolder = String(projectInput.value || state.projectFolder || "").trim();
+    if (!projectFolder) return;
+    try {
+      const resp = await postJson("/vrgdg/music_builder/list_dirty_latents", {
+        project_folder: projectFolder,
+      }, 5000);
+      if (!resp?.ok || !Array.isArray(resp.dirty_scenes)) return;
+      const dirtySet = new Set(resp.dirty_scenes);
+      let changed = false;
+      state.segments.forEach((seg) => {
+        const slot = sceneSlotNumber(seg);
+        const wasDirty = Boolean(seg._latentDirty);
+        // Only scenes that continue from the previous scene's latent care whether it changed.
+        const usesLatentContinuation = isMiniMaxH3LatentContinuationMode(miniMaxH3ContinuityModeForSegment(seg));
+        const isDirty = dirtySet.has(slot) && usesLatentContinuation;
+        if (wasDirty !== isDirty) {
+          seg._latentDirty = isDirty;
+          changed = true;
+        }
+      });
+      if (changed) renderSegments();
+    } catch (e) {
+      // Quietly ignore background poll failures
+    }
   }
 
   function openSceneOptions(segment) {
@@ -25403,8 +25686,8 @@ function openBuilder(node) {
     }
     if (String(options.referenceLyrics || "").trim()) {
       state.lyricMapper = normalizeLyricMapper({
-        ...state.lyricMapper,
         source_text: String(options.referenceLyrics || "").trim(),
+        lines: [],
       });
     }
     let progress = null;
@@ -37766,6 +38049,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       syncVideoModePanel();
       syncInspector();
       render();
+      loadDirtyLatentBadges();
       const repairedSegmentIdCount = Number(state.repairedSegmentIdCount || 0);
       if (repairedSegmentIdCount) {
         await saveSession({ quiet: true, throwOnError: true });
@@ -46308,6 +46592,52 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     }
     const previousSegment = previousAutoChainSourceSegment(segment);
     if (!previousSegment) return null;
+    if (isMiniMaxH3LatentContinuationMode(continuityMode)) {
+      const isExactFrame = continuityMode === "latent_continuation_exact_frame";
+      const slotNumber = sceneSlotNumber(segment);
+      if (slotNumber <= 1) {
+        throw new Error(`${sceneDisplayName(segment, segmentIndexInfo(segment).index)} is Scene 1 and cannot use Latent Continuation because there is no predecessor scene. Switch Continuity Mode to Off.`);
+      }
+      const projectFolder = String(projectInput.value || state.projectFolder || "").trim();
+      if (!projectFolder) throw new Error("Project folder is missing.");
+      progress?.set(`${label}: verifying predecessor Scene ${slotNumber - 1} latent file...`, percent);
+      const checkResp = await postJson("/vrgdg/music_builder/check_latent_predecessor", {
+        project_folder: projectFolder,
+        scene_number: slotNumber,
+      }, 10000);
+      if (!checkResp?.predecessor_exists) {
+        throw new Error(`Latent Continuation requires Scene ${slotNumber - 1} latent file, but none was found. Render Scene ${slotNumber - 1} first.`);
+      }
+      // Exact Last Frame also needs the predecessor's real last frame as an image. It is passed as its own
+      // field (not framePath) so it is never injected as a reference image or a prompt block.
+      let exactFramePath = "";
+      if (isExactFrame) {
+        const previousVideoPath = String(selectedSegmentVideoPath(previousSegment) || "").trim();
+        if (!previousVideoPath) {
+          throw new Error(`Latent Continuation + Exact Last Frame needs Scene ${slotNumber - 1}'s rendered video to read its last frame, but it has none. Render Scene ${slotNumber - 1} first, or switch to plain Latent Continuation.`);
+        }
+        progress?.set(`${label}: extracting Scene ${slotNumber - 1}'s exact last frame...`, percent);
+        const extractedFrame = await postJson("/vrgdg/music_builder/extract_video_final_frame", {
+          project_folder: projectFolder,
+          source_path: previousVideoPath,
+          scene_number: slotNumber,
+          frame_count: 1,
+        }, 120000);
+        exactFramePath = String(extractedFrame?.saved_path || "").trim();
+        if (!exactFramePath) throw new Error("Could not extract the previous scene's last frame for Latent Continuation + Exact Last Frame.");
+      }
+      segment.minimax_h3_continuity_mode_used = continuityMode;
+      segment.minimax_h3_continuity_source_scene_id = String(previousSegment.id || "");
+      return {
+        continuityMode,
+        transitionEngine: "latent_continuation",
+        overlapFrames: 0,
+        framePath: "",
+        framePaths: [],
+        exactFramePath,
+        previousSegment,
+      };
+    }
     const previousVideoPath = String(selectedSegmentVideoPath(previousSegment) || "").trim();
     if (!previousVideoPath) {
       progress?.set(`${label}: the previous scene has no rendered video, so this scene will render without a continuity frame.`, percent);
@@ -46511,12 +46841,19 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       : null;
     progress?.set(`${batchLabel}Preparing exact MiniMax H3 scene timing and ${builtInAudio ? "native audio generation" : "input audio"}...`, pct(8));
 
+    const latentContextFrames = [16, 22, 39, 56].includes(Number(segment?.minimax_h3_latent_context_frames))
+      ? Number(segment.minimax_h3_latent_context_frames)
+      : (miniMaxSettings.latent_context_frames || 22);
     try {
       const payload = {
         project_folder: projectFolder,
         scene_number: slotNumber,
         audio_mode: miniMaxSettings.audio_mode,
         video_mode: mode,
+        continuity_mode: continuityInput?.continuityMode || miniMaxSettings.continuity_mode || "off",
+        latent_context_frames: latentContextFrames,
+        minimax_h3_latent_context_frames: latentContextFrames,
+        latent_exact_frame_path: continuityInput?.exactFramePath || "",
         audio_path: builtInAudio ? "" : sourceAudioPath,
         prompt,
         pass2_prompt: String(segment?.minimax_h3_pass2_prompt || ""),
@@ -46546,6 +46883,9 @@ Chrome vault corridor = Sealed industrial passage...</pre>
         latent_upscale_scale: twoPass ? miniMaxSettings.two_pass_latent_upscale_scale : undefined,
         latent_upscaler_name: (twoPass || threePass) ? miniMaxSettings.two_pass_latent_upscaler_name : undefined,
         two_pass_use_te_speed: (twoPass || threePass) ? miniMaxSettings.two_pass_use_te_speed : undefined,
+        two_pass_use_feedforward: twoPass ? miniMaxSettings.two_pass_use_feedforward : undefined,
+        two_pass_use_block_sparse_attention: twoPass ? miniMaxSettings.two_pass_use_block_sparse_attention : undefined,
+        two_pass_use_fast_vae_decode: twoPass ? miniMaxSettings.two_pass_use_fast_vae_decode : undefined,
         te_speed_processing_control: (twoPass || threePass) ? miniMaxSettings.two_pass_te_speed_processing_control : undefined,
         te_speed_start_percent: (twoPass || threePass) ? miniMaxSettings.two_pass_te_speed_start_percent : undefined,
         te_speed_end_percent: (twoPass || threePass) ? miniMaxSettings.two_pass_te_speed_end_percent : undefined,
@@ -46910,6 +47250,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       segment.video_status = "done";
       syncPreview(segment);
       render();
+      loadDirtyLatentBadges();
       if (options.autoSaveAfter !== false) {
         await autoSaveSessionQuiet(options.autoSaveReason || "MiniMax H3 scene video complete");
       }
@@ -50042,9 +50383,35 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     document.body.append(backdrop);
   }
 
+  // A scene latent only matches the render that produced it, so it is removed with that video.
+  // Never reindex here: the scene keeps its slot, only its stale latent goes.
+  async function deleteStaleSceneLatents(segment = null) {
+    const projectFolder = String(state.projectFolder || projectInput?.value || "").trim();
+    if (!projectFolder) return;
+    const payload = { project_folder: projectFolder };
+    if (segment) {
+      if (segmentTrack(segment) === "overlay") return;
+      const slotNumber = sceneSlotNumber(segment);
+      if (!slotNumber) return;
+      payload.scene_number = slotNumber;
+      payload.reindex = false;
+    } else {
+      payload.all = true;
+    }
+    const resp = await postJson("/vrgdg/music_builder/delete_scene_latent", payload, 10000).catch((error) => {
+      console.warn("[VRGDG] Could not delete stale scene latent:", error);
+      return null;
+    });
+    loadDirtyLatentBadges();
+    return resp;
+  }
+
   async function deleteSegment() {
     const segment = activeSegment();
     if (!segment) return;
+    const isBase = segmentTrack(segment) !== "overlay";
+    const slotNumber = isBase ? sceneSlotNumber(segment) : null;
+    const projectFolder = String(state.projectFolder || projectInput?.value || "").trim();
     pushHistory();
     if (segmentTrack(segment) === "overlay") {
       state.overlaySegments = state.overlaySegments.filter((item) => item.id !== segment.id);
@@ -50053,6 +50420,13 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       const removedStart = Number(segment.start || 0);
       const removedEnd = Math.max(removedStart, Number(segment.end || removedStart));
       state.segments = state.segments.filter((item) => item.id !== segment.id);
+      if (slotNumber && projectFolder) {
+        postJson("/vrgdg/music_builder/delete_scene_latent", {
+          project_folder: projectFolder,
+          scene_number: slotNumber,
+          reindex: true,
+        }, 10000).catch(() => null);
+      }
       const removedDuration = closeBaseTimelineGap(removedStart, removedEnd);
       const next = state.segments.find((item) => Number(item.start || 0) >= removedStart - 0.001) || state.segments[state.segments.length - 1] || null;
       state.activeId = next?.id || state.overlaySegments[0]?.id || "";
@@ -50061,6 +50435,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     state.activeTrack = segmentTrack(activeSegment());
     syncInspector();
     render();
+    loadDirtyLatentBadges();
     await syncPromptJsonFromSegments("segment deleted");
     await syncI2VMotionJsonFromSegments("segment deleted");
     autoSaveSessionQuiet("segment deleted");
@@ -50165,12 +50540,19 @@ Chrome vault corridor = Sealed industrial passage...</pre>
         media.segment.preview_mode = "image";
       }
       ensureSegmentRuntimeFields(media.segment);
+      // Deleting any video of this scene makes its saved latent stale, so it goes with it.
+      let latentRemoved = false;
+      if (media.type === "video") {
+        const latentResp = await deleteStaleSceneLatents(media.segment);
+        latentRemoved = Boolean(latentResp?.deleted);
+        media.segment._latentDirty = false;
+      }
       syncPreview(media.segment);
       syncInspector();
       renderList();
       render();
       await autoSaveSessionQuiet(`${media.type} deleted`);
-      toast(`Deleted ${media.type} from project.`);
+      toast(`Deleted ${media.type} from project.${latentRemoved ? " Its saved latent was removed too." : ""}`);
     } catch (error) {
       toast(String(error?.message || error), true);
     } finally {
@@ -50263,6 +50645,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     state.flowGptBrowserSettings = defaultFlowGptBrowserSettings();
     state.ernieImageSettings = defaultErnieImageSettings();
     state.krea2TwoPassSettings = defaultKrea2TwoPassSettings();
+    state.lyricMapper = defaultLyricMapper();
     state.useFluxGlobalImageIngredients = false;
     state.fluxGlobalImageIngredients = [];
     state.fluxReferenceBuilder = defaultFluxReferenceBuilder();
@@ -53663,7 +54046,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       return;
     }
     const ok = window.confirm(
-      `Remove ALL videos from the timeline?\n\nThis clears video assignments and video history from ${assignedSegments.length} scene${assignedSegments.length === 1 ? "" : "s"}.\n\nThe ${videoPaths.length} video file${videoPaths.length === 1 ? "" : "s"} and their thumbnails will NOT be deleted from the project folder. They remain on disk as backups.`
+      `Remove ALL videos from the timeline?\n\nThis clears video assignments and video history from ${assignedSegments.length} scene${assignedSegments.length === 1 ? "" : "s"}.\n\nThe ${videoPaths.length} video file${videoPaths.length === 1 ? "" : "s"} and their thumbnails will NOT be deleted from the project folder. They remain on disk as backups.\n\nSaved scene latents (Latent Continuation) are deleted too, since they no longer match any video.`
     );
     if (!ok) return;
 
@@ -53699,6 +54082,8 @@ Chrome vault corridor = Sealed industrial passage...</pre>
         segment.preview_mode = "image";
         ensureSegmentRuntimeFields(segment);
       }
+      await deleteStaleSceneLatents();
+      segments.forEach((segment) => { segment._latentDirty = false; });
       previewVideo.pause();
       previewVideo.removeAttribute("src");
       previewVideo.dataset.path = "";
@@ -58042,6 +58427,9 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     miniMaxAdvancedUseTeSpeed.input,
     miniMaxTwoPassLatentScale,
     miniMaxTwoPassUseTeSpeed.input,
+    miniMaxTwoPassUseFeedforward.input,
+    miniMaxTwoPassUseBlockSparseAttention.input,
+    miniMaxTwoPassUseFastVaeDecode.input,
     miniMaxTwoPassTeProcessingControl,
     miniMaxTwoPassTeStart,
     miniMaxTwoPassTeEnd,
@@ -58073,7 +58461,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     const preset = {
       "8gb": { tile: 352, chunk: 51 },
       "12gb": { tile: 512, chunk: 85 },
-      "16gb": { tile: 576, chunk: 119 },
+      "16gb": { tile: 576, chunk: 272 },
       "24gb": { tile: 672, chunk: 153 },
     }[miniMaxAdvancedVramPreset.value];
     if (!preset) return;
@@ -58084,10 +58472,12 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     miniMaxAdvancedTemporalOverlap.value = "17";
     miniMaxAdvancedSpatialWOverlap.value = "128";
     miniMaxAdvancedSpatialHOverlap.value = "128";
-    miniMaxAdvancedFadeWidth.value = "32";
-    miniMaxAdvancedFadeHeight.value = "32";
+    miniMaxAdvancedFadeWidth.value = "128";
+    miniMaxAdvancedFadeHeight.value = "128";
     miniMaxAdvancedMinTileSize.value = "256";
     miniMaxAdvancedAnchorStrength.value = "0.999";
+    miniMaxAdvancedOverlapMode.value = "earlier";
+    miniMaxAdvancedOverlapBlend.value = "smoothstep";
     persistMiniMaxSettings();
   });
   for (const control of [
@@ -58165,6 +58555,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
       const segment = requireActiveSegment();
       if (!segment) return;
       pushHistory();
+      clearMiniMaxImageReferenceStartFrameOnModeSwitch(segment, button.dataset.minimaxH3Mode);
       state.miniMaxH3TwoPassEnabled = button.dataset.minimaxH3Mode === "image_reference_to_video";
       state.miniMaxH3ThreePassEnabled = false;
       setMiniMaxH3ModeForSegment(segment, button.dataset.minimaxH3Mode);
@@ -58176,6 +58567,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     const segment = requireActiveSegment();
     if (!segment) return;
     pushHistory();
+    clearMiniMaxImageReferenceStartFrameOnModeSwitch(segment, "reference_to_video");
     state.miniMaxH3TwoPassEnabled = true;
     state.miniMaxH3ThreePassEnabled = false;
     setMiniMaxH3ModeForSegment(segment, "reference_to_video");
@@ -58186,6 +58578,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     const segment = requireActiveSegment();
     if (!segment) return;
     pushHistory();
+    clearMiniMaxImageReferenceStartFrameOnModeSwitch(segment, "reference_to_video");
     state.miniMaxH3TwoPassEnabled = false;
     state.miniMaxH3ThreePassEnabled = true;
     setMiniMaxH3ModeForSegment(segment, "reference_to_video");
@@ -58215,6 +58608,7 @@ Chrome vault corridor = Sealed industrial passage...</pre>
     }
     syncMiniMaxH3Panel();
     syncMiniMaxReferenceButtons();
+    loadDirtyLatentBadges();
     autoSaveSessionQuiet("MiniMax H3 continuity mode changed").catch(() => null);
   });
   miniMaxAddSpeakerCueButton.onclick = () => {

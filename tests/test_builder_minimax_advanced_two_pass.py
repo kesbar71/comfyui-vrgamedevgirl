@@ -12,6 +12,21 @@ RUNNER_SOURCE = (ROOT / "VRGDG_WorkflowRunnerNodes.py").read_text(encoding="utf-
 
 
 class BuilderMiniMaxAdvancedTwoPassTests(unittest.TestCase):
+    def test_minimax_two_pass_redo_rerolls_all_seed_paths(self):
+        for assignment in (
+            "settings.two_pass_pass1_seed = randomSeedValue();",
+            "settings.two_pass_pass2_seed = randomSeedValue();",
+            "settings.advanced_two_pass_pass1_seed = randomSeedValue();",
+            "settings.advanced_two_pass_pass2_seed = randomSeedValue();",
+        ):
+            self.assertIn(assignment, BUILDER_SOURCE)
+
+        self.assertIn("def _seed_payload(key, default):", RUNNER_SOURCE)
+        self.assertIn("if value < 0:", RUNNER_SOURCE)
+        self.assertIn("random.randrange(0, 0xFFFFFFFFFFFFFFFF + 1)", RUNNER_SOURCE)
+        self.assertIn('_seed_payload("pass1_seed", seed)', RUNNER_SOURCE)
+        self.assertIn('_seed_payload("pass2_seed", seed)', RUNNER_SOURCE)
+
     def test_former_three_pass_button_is_advanced_two_pass(self):
         self.assertIn('makeButton("Ref to Video\\n2 Pass Advanced")', BUILDER_SOURCE)
         self.assertIn(
@@ -23,13 +38,26 @@ class BuilderMiniMaxAdvancedTwoPassTests(unittest.TestCase):
         for text in (
             '"8gb": { tile: 352, chunk: 51 }',
             '"12gb": { tile: 512, chunk: 85 }',
-            '"16gb": { tile: 576, chunk: 119 }',
+            '"16gb": { tile: 576, chunk: 272 }',
             '"24gb": { tile: 672, chunk: 153 }',
         ):
             self.assertIn(text, BUILDER_SOURCE)
         self.assertIn('advanced_two_pass_pass2_steps: 1', BUILDER_SOURCE)
         self.assertIn('advanced_two_pass_pass2_sampler: "sa_solver"', BUILDER_SOURCE)
         self.assertIn('advanced_two_pass_pass2_scheduler: "simple"', BUILDER_SOURCE)
+
+    def test_advanced_defaults_avoid_hard_tile_and_short_chunk_boundaries(self):
+        self.assertIn('advanced_two_pass_defaults_version: 3', BUILDER_SOURCE)
+        self.assertIn('advanced_two_pass_chunk_length: 272', BUILDER_SOURCE)
+        self.assertIn('advanced_two_pass_fade_width: 160', BUILDER_SOURCE)
+        self.assertIn('advanced_two_pass_fade_height: 128', BUILDER_SOURCE)
+        self.assertIn('advanced_two_pass_overlap_mode: "earlier"', BUILDER_SOURCE)
+        self.assertIn('advanced_two_pass_overlap_blend: "smoothstep"', BUILDER_SOURCE)
+        self.assertIn('const shouldMigrateLegacyAdvancedDefaults', BUILDER_SOURCE)
+        self.assertIn('miniMaxAdvancedFadeWidth.value = "128"', BUILDER_SOURCE)
+        self.assertIn('miniMaxAdvancedFadeHeight.value = "128"', BUILDER_SOURCE)
+        self.assertIn('miniMaxAdvancedOverlapMode.value = "earlier"', BUILDER_SOURCE)
+        self.assertIn('miniMaxAdvancedOverlapBlend.value = "smoothstep"', BUILDER_SOURCE)
 
     def test_resolutions_are_visible_and_expert_controls_are_collapsed(self):
         self.assertIn('"Pass 1 resolution"', BUILDER_SOURCE)
@@ -113,6 +141,8 @@ class BuilderMiniMaxAdvancedTwoPassTests(unittest.TestCase):
                 "MMH3TemporalSplitParams": object(),
                 "MMH3SpatialSplitParams": spatial_node_class,
             },
+            "_patch_minimax_h3_latent_continuation": lambda _prompt, _payload: {"enabled": False},
+            "_patch_minimax_h3_save_latent": lambda _prompt, _payload, _timing=None: {"enabled": False},
             "_int_payload": lambda payload, key, default, low, high: max(low, min(high, int(payload.get(key, default)))),
             "_float_payload": lambda payload, key, default, low, high: max(low, min(high, float(payload.get(key, default)))),
             "_bool_payload": lambda payload, key, default=False: bool(payload.get(key, default)),
